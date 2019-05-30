@@ -51,6 +51,7 @@ private:
 	void BuildTextureBufferViews();
 	void BuildConstantBufferViews();
 	void BuildRootSignature();
+	void BuildPostProcessRootSignature();
 	void BuildShadersAndInputLayout();
 	void BuildShapeGeometry();
 	void BuildArcheGeometry(
@@ -94,6 +95,8 @@ private:
 	ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
 	ComPtr<ID3D12DescriptorHeap> mCbvHeap = nullptr;
 	ComPtr<ID3D12DescriptorHeap> mSrvDescriptorHeap = nullptr;
+
+	ComPtr<ID3D12RootSignature> mPostProcessRootSignature = nullptr;
 
 	std::unordered_map<std::string, std::unique_ptr<MeshGeometry>> mGeometries;
 	std::unordered_map<std::string, ComPtr<ID3DBlob>> mShaders;
@@ -142,4 +145,7 @@ private:
 
 	Textures mTextures;
 	Materials mMaterials;
+
+	std::unique_ptr<BlurCOC> mBlurCOC;
+
 };

@@ -24,6 +24,7 @@
 #include "FBXLoader.h"
 #include "TextureLoader.h"
 #include "Utility.h"
+#include "../BlurCOC.h"
 
 #include "Portfolio_Game.h"
 
@@ -111,6 +112,11 @@ void PortfolioGameApp::OnResize()
 	// The window resized, so update the aspect ratio and recompute the projection matrix.
 	//XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f*MathHelper::Pi, AspectRatio(), 1.0f, 1000.0f);
 	mPlayer.mCamera.SetProj(0.25f*MathHelper::Pi, AspectRatio(), 1.0f, 1000.0f);
+
+	if (mBlurCOC != nullptr)
+	{
+		mBlurCOC->OnResize(mClientWidth, mClientHeight);
+	}
 }
 
 void PortfolioGameApp::Update(const GameTimer& gt)
@@ -156,6 +162,19 @@ void PortfolioGameApp::Draw(const GameTimer& gt)
 	{
 		ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), mPSOs["opaque"].Get()));
 	}
+
+	mBlurCOC->Execute(mCommandList.Get(), mPostProcessRootSignature.Get(),
+		mPSOs["horzBlur"].Get(), mPSOs["vertBlur"].Get(), CurrentBackBuffer(), 4);
+
+	// Prepare to copy blurred output to the back buffer.
+	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
+		D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST));
+
+	mCommandList->CopyResource(CurrentBackBuffer(), mBlurCOC->Output());
+
+	// Transition to PRESENT state.
+	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
+		D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT));
 
 	mCommandList->RSSetViewports(1, &mScreenViewport);
 	mCommandList->RSSetScissorRects(1, &mScissorRect);
@@ -301,7 +320,7 @@ void PortfolioGameApp::OnKeyboardInput(const GameTimer& gt)
 	bool isBackward = true;
 
 	// Architecture
-	// Collision Chk
+	// Collision Check
 	XMVECTOR playerLook = mPlayer.GetCharacterInfo().mMovement.GetPlayerLook();
 	XMVECTOR playerPos = mPlayer.GetCharacterInfo().mMovement.GetPlayerPosition();
 	auto playerBoundForward = mPlayer.GetCharacterInfo().mBoundingBox;
@@ -433,7 +452,7 @@ void PortfolioGameApp::OnKeyboardInput(const GameTimer& gt)
 	else
 	{
 		if (mPlayer.isClipEnd())
-			mPlayer.SetClipName("Idle");
+			mPlayer.SetClipName("Capoeira");
 	}
 
 	if (GetAsyncKeyState('A') & 0x8000)
@@ -857,6 +876,43 @@ void PortfolioGameApp::BuildRootSignature()
 		IID_PPV_ARGS(mRootSignature.GetAddressOf())));
 }
 
+void PortfolioGameApp::BuildPostProcessRootSignature()
+{
+	CD3DX12_DESCRIPTOR_RANGE srvTable;
+	srvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+	CD3DX12_DESCRIPTOR_RANGE uavTable;
+	uavTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
+
+	// Root parameter can be a table, root descriptor or rooot constants.
+	CD3DX12_ROOT_PARAMETER slotRootParameter[3];
+
+	slotRootParameter[0].InitAsConstants(12, 0);
+	slotRootParameter[1].InitAsDescriptorTable(1, &srvTable);
+	slotRootParameter[2].InitAsDescriptorTable(1, &uavTable);
+
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(3, slotRootParameter,
+		0, nullptr,
+		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+	ComPtr<ID3DBlob> serializedRootSig = nullptr;
+	ComPtr<ID3DBlob> errorBlob = nullptr;
+	HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+		serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+
+	if (errorBlob != nullptr)
+	{
+		::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+	}
+	ThrowIfFailed(hr);
+
+	ThrowIfFailed(md3dDevice->CreateRootSignature(
+		0,
+		serializedRootSig->GetBufferPointer(),
+		serializedRootSig->GetBufferSize(),
+		IID_PPV_ARGS(mPostProcessRootSignature.GetAddressOf())));
+}
+
 void PortfolioGameApp::BuildFrameResources()
 {
 	for (int i = 0; i < gNumFrameResources; ++i)
@@ -887,7 +943,7 @@ void PortfolioGameApp::BuildShadersAndInputLayout()
 	};
 	const D3D_SHADER_MACRO monsterUIDefines[] =
 	{
-		"MONSTER", "2",
+		"MONSTER", "1",
 		NULL, NULL
 	};
 
@@ -903,6 +959,10 @@ void PortfolioGameApp::BuildShadersAndInputLayout()
 	mShaders["monsterPS"] = d3dUtil::CompileShader(L"..\\Shaders\\Monster.hlsl", nullptr, "PS", "ps_5_1");
 	mShaders["uiPS"] = d3dUtil::CompileShader(L"..\\Shaders\\UI.hlsl", playerUIDefines, "PS", "ps_5_1");
 	mShaders["skyPS"] = d3dUtil::CompileShader(L"..\\Shaders\\Sky.hlsl", nullptr, "PS", "ps_5_1");
+
+	mShaders["DOFCS"] = d3dUtil::CompileShader(L"..\\Shaders\\DepthOfField.hlsl", nullptr, "CalcDOF", "cs_5_1");
+	mShaders["horzBlurCS"] = d3dUtil::CompileShader(L"..\\Shaders\\Blur.hlsl", nullptr, "HorzBlurCS", "cs_5_1");
+	mShaders["vertBlurCS"] = d3dUtil::CompileShader(L"..\\Shaders\\Blur.hlsl", nullptr, "VertBlurCS", "cs_5_1");
 
 	mInputLayout =
 	{
@@ -1034,7 +1094,6 @@ void PortfolioGameApp::BuildPSOs()
 	opaqueWireframePsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
 	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaqueWireframePsoDesc, IID_PPV_ARGS(&mPSOs["opaque_wireframe"])));
 
-
 	// PSO for sky.
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC skyPsoDesc = opaquePsoDesc;
 
@@ -1121,6 +1180,32 @@ void PortfolioGameApp::BuildPSOs()
 	};
 	
 	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&MonsterShadowPsoDesc, IID_PPV_ARGS(&mPSOs["Monster_shadow"])));
+
+	//
+	// PSO for horizontal blur
+	//
+	D3D12_COMPUTE_PIPELINE_STATE_DESC horzBlurPSO = {};
+	horzBlurPSO.pRootSignature = mPostProcessRootSignature.Get();
+	horzBlurPSO.CS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["horzBlurCS"]->GetBufferPointer()),
+		mShaders["horzBlurCS"]->GetBufferSize()
+	};
+	horzBlurPSO.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+	ThrowIfFailed(md3dDevice->CreateComputePipelineState(&horzBlurPSO, IID_PPV_ARGS(&mPSOs["horzBlur"])));
+
+	//
+	// PSO for vertical blur
+	//
+	D3D12_COMPUTE_PIPELINE_STATE_DESC vertBlurPSO = {};
+	vertBlurPSO.pRootSignature = mPostProcessRootSignature.Get();
+	vertBlurPSO.CS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["vertBlurCS"]->GetBufferPointer()),
+		mShaders["vertBlurCS"]->GetBufferSize()
+	};
+	vertBlurPSO.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+	ThrowIfFailed(md3dDevice->CreateComputePipelineState(&vertBlurPSO, IID_PPV_ARGS(&mPSOs["vertBlur"])));
 }
 
 
@@ -1347,8 +1432,10 @@ void PortfolioGameApp::LoadFBXPlayer()
 
 	// Player
 	std::string FileName = "../Resource/FBX/Character/";
+	std::string FileName2 = "../Resource/FBX/temp/";
 	fbx.LoadFBX(outSkinnedVertices, outIndices, outSkinnedInfo, "Idle", outMaterial, FileName);
 
+	fbx.LoadFBX(outSkinnedInfo, "Capoeira", FileName2);
 	fbx.LoadFBX(outSkinnedInfo, "playerWalking", FileName);
 	fbx.LoadFBX(outSkinnedInfo, "run", FileName);
 	fbx.LoadFBX(outSkinnedInfo, "Kick", FileName);
